@@ -1,3 +1,54 @@
+python-asgiref (3.8.1-1) unstable; urgency=low
+
+  [ Alexandre Detiste ]
+  * remove old build-dependency on python3-six
+
+  [ Michael Fladischer ]
+  * New upstream version 3.8.1
+  * Update year in d/copyright.
+  * Build using pybuild-plugin-pyproject and dh-sequence-python3.
+
+ -- Michael Fladischer <fladi@debian.org>  Sun, 24 Mar 2024 17:55:45 +0000
+
+python-asgiref (3.7.2-1) unstable; urgency=medium
+
+  * New upstream version 3.7.2
+  * Bump Standards-Version to 4.6.2.
+
+ -- Michael Fladischer <fladi@debian.org>  Tue, 13 Jun 2023 21:31:54 +0000
+
+python-asgiref (3.6.0-1) unstable; urgency=low
+
+  * New upstream release.
+  * Update d/copyright with new years.
+
+ -- Michael Fladischer <fladi@debian.org>  Thu, 05 Jan 2023 14:48:05 +0000
+
+python-asgiref (3.5.2-2) unstable; urgency=medium
+
+  [ Debian Janitor ]
+  * Remove constraints unnecessary since buster (oldstable):
+    + python3-asgiref: Drop versioned constraint on python3-daphne and
+      python3-django-channels in Breaks.
+
+ -- Jelmer Vernooĳ <jelmer@debian.org>  Mon, 17 Oct 2022 00:21:13 +0100
+
+python-asgiref (3.5.2-1) unstable; urgency=low
+
+  * New upstream release.
+  * Bump Standards-Version to 4.6.1.0.
+
+ -- Michael Fladischer <fladi@debian.org>  Sun, 18 Sep 2022 21:12:51 +0000
+
+python-asgiref (3.5.0-1) unstable; urgency=low
+
+  * New upstream release.
+  * Use github tags instead of releases for d/watch.
+  * Depend on python3-all for autopkgtests.
+  * Update year in d/copyright.
+
+ -- Michael Fladischer <fladi@debian.org>  Mon, 24 Jan 2022 08:35:35 +0000
+
 python-asgiref (3.4.1-1) unstable; urgency=low
 
   * New upstream release.

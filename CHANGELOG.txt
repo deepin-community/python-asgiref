@@ -1,3 +1,113 @@
+3.8.1 (2024-03-22)
+------------------
+
+* Fixes a regression in 3.8.0 affecting nested task cancellation inside
+  sync_to_async.
+
+3.8.0 (2024-03-20)
+------------------
+
+* Adds support for Python 3.12.
+
+* Drops support for (end-of-life) Python 3.7.
+
+* Fixes task cancellation propagation to subtasks when using synchronous Django
+  middleware.
+
+* Allows nesting ``sync_to_async`` via ``asyncio.wait_for``.
+
+* Corrects WSGI adapter handling of root path.
+
+* Handles case where `"client"` is ``None`` in WsgiToAsgi adapter.
+
+3.7.2 (2023-05-27)
+------------------
+
+* The type annotations for SyncToAsync and AsyncToSync have been changed to
+  more accurately reflect the kind of callables they return.
+
+3.7.1 (2023-05-24)
+------------------
+
+* On Python 3.10 and below, the version of the "typing_extensions" package
+  is now constrained to be at least version 4 (as we depend on functionality
+  in that version and above)
+
+3.7.0 (2023-05-23)
+------------------
+
+* Contextvars are now required for the implementation of `sync` as Python 3.6
+  is now no longer a supported version.
+
+* sync_to_async and async_to_sync now pass-through
+
+* Debug and Lifespan State extensions have resulted in a typing change for some
+  request and response types. This change should be backwards-compatible.
+
+* ``asgiref`` frames will now be hidden in Django tracebacks by default.
+
+* Raw performance and garbage collection improvements in Local, SyncToAsync,
+  and AsyncToSync.
+
+3.6.0 (2022-12-20)
+------------------
+
+* Two new functions are added to the ``asgiref.sync`` module: ``iscoroutinefunction()``
+  and ``markcoroutinefunction()``.
+
+  Python 3.12 deprecates ``asyncio.iscoroutinefunction()`` as an alias for
+  ``inspect.iscoroutinefunction()``, whilst also removing the ``_is_coroutine`` marker.
+  The latter is replaced with the ``inspect.markcoroutinefunction`` decorator.
+
+  The new ``asgiref.sync`` functions are compatibility shims for these
+  functions that can be used until Python 3.12 is the minimum supported
+  version.
+
+  **Note** that these functions are considered **beta**, and as such, whilst
+  not likely, are subject to change in a point release, until the final release
+  of Python 3.12. They are included in ``asgiref`` now so that they can be
+  adopted by Django 4.2, in preparation for support of Python 3.12.
+
+* The ``loop`` argument to ``asgiref.timeout.timeout`` is deprecated. As per other
+  ``asyncio`` based APIs, the running event loop is used by default. Note that
+  ``asyncio`` provides timeout utilities from Python 3.11, and these should be
+  preferred where available.
+
+* Support for the ``ASGI_THREADS`` environment variable, used by
+  ``SyncToAsync``, is removed. In general, a running event-loop is not
+  available to `asgiref` at import time, and so the default thread pool
+  executor cannot be configured. Protocol servers, or applications, should set
+  the default executor as required when configuring the event loop at
+  application startup.
+
+3.5.2 (2022-05-16)
+------------------
+
+* Allow async-callables class instances to be passed to AsyncToSync
+  without warning
+
+* Prevent giving async-callable class instances to SyncToAsync
+
+
+3.5.1 (2022-04-30)
+------------------
+
+* sync_to_async in thread-sensitive mode now works corectly when the
+  outermost thread is synchronous (#214)
+
+
+3.5.0 (2022-01-22)
+------------------
+
+* Python 3.6 is no longer supported, and asyncio calls have been changed to
+  use only the modern versions of the APIs as a result
+
+* Several causes of RuntimeErrors in cases where an event loop was assigned
+  to a thread but not running
+
+* Speed improvements in the Local class
+
+
 3.4.1 (2021-07-01)
 ------------------
 

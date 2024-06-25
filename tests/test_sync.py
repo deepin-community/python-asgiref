@@ -4,14 +4,20 @@ import multiprocessing
 import sys
 import threading
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from unittest import TestCase
 
 import pytest
 
-from asgiref.compatibility import create_task, get_running_loop
-from asgiref.sync import ThreadSensitiveContext, async_to_sync, sync_to_async
+from asgiref.sync import (
+    ThreadSensitiveContext,
+    async_to_sync,
+    iscoroutinefunction,
+    sync_to_async,
+)
+from asgiref.timeout import timeout
 
 
 @pytest.mark.asyncio
@@ -35,15 +41,15 @@ async def test_sync_to_async():
     assert result == 42
     assert end - start >= 1
     # Set workers to 1, call it twice and make sure that works right
-    loop = get_running_loop()
+    loop = asyncio.get_running_loop()
     old_executor = loop._default_executor or ThreadPoolExecutor()
     loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
     try:
         start = time.monotonic()
         await asyncio.wait(
             [
-                create_task(async_function()),
-                create_task(async_function()),
+                asyncio.create_task(async_function()),
+                asyncio.create_task(async_function()),
             ]
         )
         end = time.monotonic()
@@ -97,6 +103,18 @@ async def test_async_to_sync_fail_partial():
     assert excinfo.value.args == (
         "sync_to_async can only be applied to sync functions.",
     )
+
+
+@pytest.mark.asyncio
+async def test_sync_to_async_raises_typeerror_for_async_callable_instance():
+    class CallableClass:
+        async def __call__(self):
+            return None
+
+    with pytest.raises(
+        TypeError, match="sync_to_async can only be applied to sync functions."
+    ):
+        sync_to_async(CallableClass())
 
 
 @pytest.mark.asyncio
@@ -201,6 +219,58 @@ async def test_async_to_sync_to_async():
     # Check it works right
     number = await async_function()
     assert number == 65
+    assert result["worked"]
+    # Make sure that it didn't needlessly make a new async loop
+    assert result["thread"] == threading.current_thread()
+
+
+@pytest.mark.asyncio
+async def test_async_to_sync_to_async_decorator():
+    """
+    Test async_to_sync as a function decorator uses the outer thread
+    when used inside sync_to_async.
+    """
+    result = {}
+
+    # Define async function
+    @async_to_sync
+    async def inner_async_function():
+        result["worked"] = True
+        result["thread"] = threading.current_thread()
+        return 42
+
+    # Define sync function
+    @sync_to_async
+    def sync_function():
+        return inner_async_function()
+
+    # Check it works right
+    number = await sync_function()
+    assert number == 42
+    assert result["worked"]
+    # Make sure that it didn't needlessly make a new async loop
+    assert result["thread"] == threading.current_thread()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.version_info < (3, 9), reason="requires python3.9")
+async def test_async_to_sync_to_thread_decorator():
+    """
+    Test async_to_sync as a function decorator uses the outer thread
+    when used inside another sync thread.
+    """
+    result = {}
+
+    # Define async function
+    @async_to_sync
+    async def inner_async_function():
+        result["worked"] = True
+        result["thread"] = threading.current_thread()
+        return 42
+
+    # Check it works right
+    number = await asyncio.to_thread(inner_async_function)
+    assert number == 42
     assert result["worked"]
     # Make sure that it didn't needlessly make a new async loop
     assert result["thread"] == threading.current_thread()
@@ -366,9 +436,32 @@ def test_async_to_sync_partial():
     assert result["worked"]
 
 
-def test_async_to_async_method_self_attribute():
+def test_async_to_sync_on_callable_object():
     """
-    Tests async_to_async on a method copies __self__.
+    Tests async_to_sync on a callable class instance
+    """
+
+    result = {}
+
+    class CallableClass:
+        async def __call__(self, value):
+            await asyncio.sleep(0)
+            result["worked"] = True
+            return value
+
+    # Run it (without warnings)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        sync_function = async_to_sync(CallableClass())
+        out = sync_function(42)
+
+    assert out == 42
+    assert result["worked"] is True
+
+
+def test_async_to_sync_method_self_attribute():
+    """
+    Tests async_to_sync on a method copies __self__.
     """
     # Define async function.
     class TestClass:
@@ -398,15 +491,21 @@ def test_thread_sensitive_outside_sync():
     @async_to_sync
     async def middle():
         await inner()
+        await asyncio.create_task(inner_task())
 
-    # Inner sync function
+    # Inner sync functions
     @sync_to_async
     def inner():
         result["thread"] = threading.current_thread()
 
+    @sync_to_async
+    def inner_task():
+        result["thread2"] = threading.current_thread()
+
     # Run it
     middle()
     assert result["thread"] == threading.current_thread()
+    assert result["thread2"] == threading.current_thread()
 
 
 @pytest.mark.asyncio
@@ -435,7 +534,9 @@ async def test_thread_sensitive_outside_async():
         result["thread"] = threading.current_thread()
 
     # Run it (in supposed parallel!)
-    await asyncio.wait([create_task(outer(result_1)), create_task(inner(result_2))])
+    await asyncio.wait(
+        [asyncio.create_task(outer(result_1)), asyncio.create_task(inner(result_2))]
+    )
 
     # They should not have run in the main thread, but in the same thread
     assert result_1["thread"] != threading.current_thread()
@@ -457,8 +558,8 @@ async def test_thread_sensitive_with_context_matches():
             # Run it (in supposed parallel!)
             await asyncio.wait(
                 [
-                    create_task(store_thread_async(result_1)),
-                    create_task(store_thread_async(result_2)),
+                    asyncio.create_task(store_thread_async(result_1)),
+                    asyncio.create_task(store_thread_async(result_2)),
                 ]
             )
 
@@ -602,8 +703,29 @@ def test_sync_to_async_detected_as_coroutinefunction():
     def sync_func():
         return
 
-    assert not asyncio.iscoroutinefunction(sync_to_async)
-    assert asyncio.iscoroutinefunction(sync_to_async(sync_func))
+    assert not iscoroutinefunction(sync_to_async)
+    assert iscoroutinefunction(sync_to_async(sync_func))
+
+
+async def async_process(queue):
+    queue.put(42)
+
+
+def sync_process(queue):
+    """Runs async_process synchronously"""
+    async_to_sync(async_process)(queue)
+
+
+def fork_first():
+    """Forks process before running sync_process"""
+    queue = multiprocessing.Queue()
+    fork = multiprocessing.Process(target=sync_process, args=[queue])
+    fork.start()
+    fork.join(3)
+    # Force cleanup in failed test case
+    if fork.is_alive():
+        fork.terminate()
+    return queue.get(True, 1)
 
 
 @pytest.mark.asyncio
@@ -612,26 +734,6 @@ async def test_multiprocessing():
     Tests that a forked process can use async_to_sync without it looking for
     the event loop from the parent process.
     """
-
-    test_queue = multiprocessing.Queue()
-
-    async def async_process():
-        test_queue.put(42)
-
-    def sync_process():
-        """Runs async_process synchronously"""
-        async_to_sync(async_process)()
-
-    def fork_first():
-        """Forks process before running sync_process"""
-        fork = multiprocessing.Process(target=sync_process)
-        fork.start()
-        fork.join(3)
-        # Force cleanup in failed test case
-        if fork.is_alive():
-            fork.terminate()
-        return test_queue.get(True, 1)
-
     assert await sync_to_async(fork_first)() == 42
 
 
@@ -672,31 +774,6 @@ async def test_sync_to_async_uses_executor():
     )
 
 
-@pytest.mark.skipif(sys.version_info < (3, 7), reason="Issue persists with 3.6")
-def test_sync_to_async_deadlock_raises():
-    def db_write():
-        pass
-
-    async def io_task():
-        await sync_to_async(db_write)()
-
-    async def do_io_tasks():
-        t = asyncio.create_task(io_task())
-        await t
-        # await asyncio.gather(io_task()) # Also deadlocks
-        # await io_task() # Works
-
-    def view():
-        async_to_sync(do_io_tasks)()
-
-    async def server_entry():
-        await sync_to_async(view)()
-
-    with pytest.raises(RuntimeError):
-        asyncio.run(server_entry())
-
-
-@pytest.mark.skipif(sys.version_info < (3, 7), reason="Issue persists with 3.6")
 def test_sync_to_async_deadlock_ignored_with_exception():
     """
     Ensures that throwing an exception from inside a deadlock-protected block
@@ -717,3 +794,383 @@ def test_sync_to_async_deadlock_ignored_with_exception():
             pass
 
     asyncio.run(server_entry())
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail
+async def test_sync_to_async_with_blocker_thread_sensitive():
+    """
+    Tests sync_to_async running on a long-time blocker in a thread_sensitive context.
+    Expected to fail at the moment.
+    """
+
+    delay = 1  # second
+    event = multiprocessing.Event()
+
+    async def async_process_waiting_on_event():
+        """Wait for the event to be set."""
+        await sync_to_async(event.wait)()
+        return 42
+
+    async def async_process_that_triggers_event():
+        """Sleep, then set the event."""
+        await asyncio.sleep(delay)
+        await sync_to_async(event.set)()
+
+    # Run the event setter as a task.
+    trigger_task = asyncio.ensure_future(async_process_that_triggers_event())
+
+    try:
+        # wait on the event waiter, which is now blocking the event setter.
+        async with timeout(delay + 1):
+            assert await async_process_waiting_on_event() == 42
+    except asyncio.TimeoutError:
+        # In case of timeout, set the event to unblock things, else
+        # downstream tests will get fouled up.
+        event.set()
+        raise
+    finally:
+        await trigger_task
+
+
+@pytest.mark.asyncio
+async def test_sync_to_async_with_blocker_non_thread_sensitive():
+    """
+    Tests sync_to_async running on a long-time blocker in a non_thread_sensitive context.
+    """
+
+    delay = 1  # second
+    event = multiprocessing.Event()
+
+    async def async_process_waiting_on_event():
+        """Wait for the event to be set."""
+        await sync_to_async(event.wait, thread_sensitive=False)()
+        return 42
+
+    async def async_process_that_triggers_event():
+        """Sleep, then set the event."""
+        await asyncio.sleep(1)
+        await sync_to_async(event.set)()
+
+    # Run the event setter as a task.
+    trigger_task = asyncio.ensure_future(async_process_that_triggers_event())
+
+    try:
+        # wait on the event waiter, which is now blocking the event setter.
+        async with timeout(delay + 1):
+            assert await async_process_waiting_on_event() == 42
+    except asyncio.TimeoutError:
+        # In case of timeout, set the event to unblock things, else
+        # downstream tests will get fouled up.
+        event.set()
+        raise
+    finally:
+        await trigger_task
+
+
+@pytest.mark.asyncio
+async def test_sync_to_async_within_create_task():
+    """
+    Test a stack of sync_to_async/async_to_sync/sync_to_async works even when last
+    sync_to_async is wrapped in asyncio.wait_for.
+    """
+    main_thread = threading.current_thread()
+    sync_thread = None
+
+    # Hypothetical Django scenario - middleware function is sync and will run
+    # in a new thread created by sync_to_async
+    def sync_middleware():
+        nonlocal sync_thread
+        sync_thread = threading.current_thread()
+        assert sync_thread != main_thread
+        # View is async and wrapped with async_to_sync.
+        async_to_sync(async_view)()
+
+    async def async_view():
+        # Call a sync function using sync_to_async, but asyncio.wait_for it
+        # rather than directly await it.
+        await asyncio.wait_for(sync_to_async(sync_task)(), timeout=1)
+
+    task_executed = False
+
+    def sync_task():
+        nonlocal task_executed, sync_thread
+        assert sync_thread == threading.current_thread()
+        task_executed = True
+
+    async with ThreadSensitiveContext():
+        await sync_to_async(sync_middleware)()
+
+    assert task_executed
+
+
+@pytest.mark.asyncio
+async def test_inner_shield_sync_middleware():
+    """
+    Tests that asyncio.shield is capable of preventing http.disconnect from
+    cancelling a django request task when using sync middleware.
+    """
+
+    # Hypothetical Django scenario - middleware function is sync
+    def sync_middleware():
+        async_to_sync(async_view)()
+
+    task_complete = False
+    task_cancel_caught = False
+
+    # Future that completes when subtask cancellation attempt is caught
+    task_blocker = asyncio.Future()
+
+    async def async_view():
+        """Async view with a task that is shielded from cancellation."""
+        nonlocal task_complete, task_cancel_caught, task_blocker
+        task = asyncio.create_task(async_task())
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            task_cancel_caught = True
+            task_blocker.set_result(True)
+            await task
+            task_complete = True
+
+    task_executed = False
+
+    # Future that completes after subtask is created
+    task_started_future = asyncio.Future()
+
+    async def async_task():
+        """Async subtask that should not be canceled when parent is canceled."""
+        nonlocal task_started_future, task_executed, task_blocker
+        task_started_future.set_result(True)
+        await task_blocker
+        task_executed = True
+
+    task_cancel_propagated = False
+
+    async with ThreadSensitiveContext():
+        task = asyncio.create_task(sync_to_async(sync_middleware)())
+        await task_started_future
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            task_cancel_propagated = True
+        assert not task_cancel_propagated
+        assert task_cancel_caught
+        assert task_complete
+
+    assert task_executed
+
+
+@pytest.mark.asyncio
+async def test_inner_shield_async_middleware():
+    """
+    Tests that asyncio.shield is capable of preventing http.disconnect from
+    cancelling a django request task when using async middleware.
+    """
+
+    # Hypothetical Django scenario - middleware function is async
+    async def async_middleware():
+        await async_view()
+
+    task_complete = False
+    task_cancel_caught = False
+
+    # Future that completes when subtask cancellation attempt is caught
+    task_blocker = asyncio.Future()
+
+    async def async_view():
+        """Async view with a task that is shielded from cancellation."""
+        nonlocal task_complete, task_cancel_caught, task_blocker
+        task = asyncio.create_task(async_task())
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            task_cancel_caught = True
+            task_blocker.set_result(True)
+            await task
+            task_complete = True
+
+    task_executed = False
+
+    # Future that completes after subtask is created
+    task_started_future = asyncio.Future()
+
+    async def async_task():
+        """Async subtask that should not be canceled when parent is canceled."""
+        nonlocal task_started_future, task_executed, task_blocker
+        task_started_future.set_result(True)
+        await task_blocker
+        task_executed = True
+
+    task_cancel_propagated = False
+
+    async with ThreadSensitiveContext():
+        task = asyncio.create_task(async_middleware())
+        await task_started_future
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            task_cancel_propagated = True
+        assert not task_cancel_propagated
+        assert task_cancel_caught
+        assert task_complete
+
+    assert task_executed
+
+
+@pytest.mark.asyncio
+async def test_inner_shield_sync_and_async_middleware():
+    """
+    Tests that asyncio.shield is capable of preventing http.disconnect from
+    cancelling a django request task when using sync and middleware chained
+    together.
+    """
+
+    # Hypothetical Django scenario - middleware function is sync
+    def sync_middleware_1():
+        async_to_sync(async_middleware_2)()
+
+    # Hypothetical Django scenario - middleware function is async
+    async def async_middleware_2():
+        await sync_to_async(sync_middleware_3)()
+
+    # Hypothetical Django scenario - middleware function is sync
+    def sync_middleware_3():
+        async_to_sync(async_middleware_4)()
+
+    # Hypothetical Django scenario - middleware function is async
+    async def async_middleware_4():
+        await sync_to_async(sync_middleware_5)()
+
+    # Hypothetical Django scenario - middleware function is sync
+    def sync_middleware_5():
+        async_to_sync(async_view)()
+
+    task_complete = False
+    task_cancel_caught = False
+
+    # Future that completes when subtask cancellation attempt is caught
+    task_blocker = asyncio.Future()
+
+    async def async_view():
+        """Async view with a task that is shielded from cancellation."""
+        nonlocal task_complete, task_cancel_caught, task_blocker
+        task = asyncio.create_task(async_task())
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            task_cancel_caught = True
+            task_blocker.set_result(True)
+            await task
+            task_complete = True
+
+    task_executed = False
+
+    # Future that completes after subtask is created
+    task_started_future = asyncio.Future()
+
+    async def async_task():
+        """Async subtask that should not be canceled when parent is canceled."""
+        nonlocal task_started_future, task_executed, task_blocker
+        task_started_future.set_result(True)
+        await task_blocker
+        task_executed = True
+
+    task_cancel_propagated = False
+
+    async with ThreadSensitiveContext():
+        task = asyncio.create_task(sync_to_async(sync_middleware_1)())
+        await task_started_future
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            task_cancel_propagated = True
+        assert not task_cancel_propagated
+        assert task_cancel_caught
+        assert task_complete
+
+    assert task_executed
+
+
+@pytest.mark.asyncio
+async def test_inner_shield_sync_and_async_middleware_sync_task():
+    """
+    Tests that asyncio.shield is capable of preventing http.disconnect from
+    cancelling a django request task when using sync and middleware chained
+    together with an async view calling a sync function calling an async task.
+
+    This test ensures that a parent initiated task cancellation will not
+    propagate to a shielded subtask.
+    """
+
+    # Hypothetical Django scenario - middleware function is sync
+    def sync_middleware_1():
+        async_to_sync(async_middleware_2)()
+
+    # Hypothetical Django scenario - middleware function is async
+    async def async_middleware_2():
+        await sync_to_async(sync_middleware_3)()
+
+    # Hypothetical Django scenario - middleware function is sync
+    def sync_middleware_3():
+        async_to_sync(async_middleware_4)()
+
+    # Hypothetical Django scenario - middleware function is async
+    async def async_middleware_4():
+        await sync_to_async(sync_middleware_5)()
+
+    # Hypothetical Django scenario - middleware function is sync
+    def sync_middleware_5():
+        async_to_sync(async_view)()
+
+    task_complete = False
+    task_cancel_caught = False
+
+    # Future that completes when subtask cancellation attempt is caught
+    task_blocker = asyncio.Future()
+
+    async def async_view():
+        """Async view with a task that is shielded from cancellation."""
+        nonlocal task_complete, task_cancel_caught, task_blocker
+        task = asyncio.create_task(sync_to_async(sync_parent)())
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            task_cancel_caught = True
+            task_blocker.set_result(True)
+            await task
+            task_complete = True
+
+    task_executed = False
+
+    # Future that completes after subtask is created
+    task_started_future = asyncio.Future()
+
+    def sync_parent():
+        async_to_sync(async_task)()
+
+    async def async_task():
+        """Async subtask that should not be canceled when parent is canceled."""
+        nonlocal task_started_future, task_executed, task_blocker
+        task_started_future.set_result(True)
+        await task_blocker
+        task_executed = True
+
+    task_cancel_propagated = False
+
+    async with ThreadSensitiveContext():
+        task = asyncio.create_task(sync_to_async(sync_middleware_1)())
+        await task_started_future
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            task_cancel_propagated = True
+        assert not task_cancel_propagated
+        assert task_cancel_caught
+        assert task_complete
+
+    assert task_executed
